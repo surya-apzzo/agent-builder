@@ -1,0 +1,964 @@
+{
+	"info": {
+		"_postman_id": "merchant-onboarding-api",
+		"name": "Merchant Onboarding API",
+		"description": "Complete API collection for Merchant Onboarding Service",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health & Info",
+			"item": [
+				{
+					"name": "Root - API Info",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								""
+							]
+						},
+						"description": "Get API information and available endpoints"
+					},
+					"response": []
+				},
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/health",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"health"
+							]
+						},
+						"description": "Check if the service is healthy and all handlers are initialized"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "File Upload",
+			"item": [
+				{
+					"name": "Get Upload URL - Knowledge Base",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test(\"Response has upload_url\", function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData).to.have.property('upload_url');",
+									"    pm.expect(jsonData).to.have.property('object_path');",
+									"    ",
+									"    // Save object_path, upload_url, and content_type for later use",
+									"    pm.environment.set(\"knowledge_object_path\", jsonData.object_path);",
+									"    pm.environment.set(\"knowledge_upload_url\", jsonData.upload_url);",
+									"    // Use the Content-Type from the response headers (exact match required!)",
+									"    pm.environment.set(\"knowledge_content_type\", jsonData.headers[\"Content-Type\"]);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "merchant_id",
+									"value": "{{merchant_id}}",
+									"type": "text"
+								},
+								{
+									"key": "folder",
+									"value": "knowledge_base",
+									"type": "text",
+									"description": "Folder: knowledge_base, prompt-docs, training_files, or brand-images"
+								},
+								{
+									"key": "filename",
+									"value": "knowledge-base.pdf",
+									"type": "text"
+								},
+								{
+									"key": "content_type",
+									"value": "application/pdf",
+									"type": "text"
+								},
+								{
+									"key": "expiration_minutes",
+									"value": "60",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/files/upload-url",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"files",
+								"upload-url"
+							]
+						},
+						"description": "Get signed URL for uploading a knowledge base document (PDF, DOCX, TXT, HTML)"
+					},
+					"response": []
+				},
+				{
+					"name": "Upload File to GCS - Knowledge Base",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test(\"File uploaded successfully\", function () {",
+									"    // GCS returns 200 on successful upload",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 204]);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "{{knowledge_content_type}}",
+								"description": "Must match the content_type used when getting upload URL"
+							}
+						],
+						"body": {
+							"mode": "file",
+							"file": {
+								"src": ""
+							}
+						},
+						"url": {
+							"raw": "{{knowledge_upload_url}}",
+							"host": [
+								"{{knowledge_upload_url}}"
+							]
+						},
+						"description": "Upload a file directly to GCS using the signed URL from 'Get Upload URL - Knowledge Base'.\n\n**Instructions:**\n1. First run 'Get Upload URL - Knowledge Base' to get the signed URL\n2. The upload_url is automatically saved to {{knowledge_upload_url}}\n3. Select your file in the Body tab (binary mode)\n4. Make sure Content-Type matches the content_type from step 1\n5. Click Send to upload\n\n**Note:** The URL is a full GCS signed URL, not a relative path."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Upload URL - Products CSV",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"var jsonData = pm.response.json();",
+									"pm.environment.set(\"products_object_path\", jsonData.object_path);",
+									"pm.environment.set(\"products_upload_url\", jsonData.upload_url);",
+									"// Use the Content-Type from the response headers (exact match required!)",
+									"pm.environment.set(\"products_content_type\", jsonData.headers[\"Content-Type\"]);"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "merchant_id",
+									"value": "{{merchant_id}}",
+									"type": "text"
+								},
+								{
+									"key": "folder",
+									"value": "prompt-docs",
+									"type": "text"
+								},
+								{
+									"key": "filename",
+									"value": "products.csv",
+									"type": "text"
+								},
+								{
+									"key": "content_type",
+									"value": "text/csv",
+									"type": "text"
+								},
+								{
+									"key": "expiration_minutes",
+									"value": "60",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/files/upload-url",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"files",
+								"upload-url"
+							]
+						},
+						"description": "Get signed URL for uploading products CSV/XLSX file"
+					},
+					"response": []
+				},
+				{
+					"name": "Upload File to GCS - Products CSV",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test(\"File uploaded successfully\", function () {",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 204]);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "{{products_content_type}}",
+								"description": "Must match the content_type used when getting upload URL (e.g., text/csv or application/vnd.openxmlformats-officedocument.spreadsheetml.sheet)"
+							}
+						],
+						"body": {
+							"mode": "file",
+							"file": {
+								"src": ""
+							}
+						},
+						"url": {
+							"raw": "{{products_upload_url}}",
+							"host": [
+								"{{products_upload_url}}"
+							]
+						},
+						"description": "Upload a products CSV/XLSX file directly to GCS using the signed URL from 'Get Upload URL - Products CSV'.\n\n**Instructions:**\n1. First run 'Get Upload URL - Products CSV' to get the signed URL\n2. The upload_url is automatically saved to {{products_upload_url}}\n3. Select your CSV/XLSX file in the Body tab (binary mode)\n4. Make sure Content-Type matches (text/csv for CSV, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet for XLSX)\n5. Click Send to upload"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Upload URL - Logo",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"var jsonData = pm.response.json();",
+									"pm.environment.set(\"logo_object_path\", jsonData.object_path);",
+									"pm.environment.set(\"logo_upload_url\", jsonData.upload_url);",
+									"// Use the Content-Type from the response headers (exact match required!)",
+									"pm.environment.set(\"logo_content_type\", jsonData.headers[\"Content-Type\"]);"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "merchant_id",
+									"value": "{{merchant_id}}",
+									"type": "text"
+								},
+								{
+									"key": "folder",
+									"value": "brand-images",
+									"type": "text"
+								},
+								{
+									"key": "filename",
+									"value": "logo.png",
+									"type": "text"
+								},
+								{
+									"key": "content_type",
+									"value": "image/png",
+									"type": "text"
+								},
+								{
+									"key": "expiration_minutes",
+									"value": "60",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/files/upload-url",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"files",
+								"upload-url"
+							]
+						},
+						"description": "Get signed URL for uploading logo image"
+					},
+					"response": []
+				},
+				{
+					"name": "Upload File to GCS - Logo",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test(\"File uploaded successfully\", function () {",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 204]);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "{{logo_content_type}}",
+								"description": "Must match the content_type used when getting upload URL (e.g., image/png, image/jpeg)"
+							}
+						],
+						"body": {
+							"mode": "file",
+							"file": {
+								"src": ""
+							}
+						},
+						"url": {
+							"raw": "{{logo_upload_url}}",
+							"host": [
+								"{{logo_upload_url}}"
+							]
+						},
+						"description": "Upload a logo image directly to GCS using the signed URL from 'Get Upload URL - Logo'.\n\n**Instructions:**\n1. First run 'Get Upload URL - Logo' to get the signed URL\n2. The upload_url is automatically saved to {{logo_upload_url}}\n3. Select your image file in the Body tab (binary mode)\n4. Make sure Content-Type matches (image/png, image/jpeg, etc.)\n5. Click Send to upload"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Bulk Upload URLs",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test(\"Response has URLs array\", function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData).to.have.property('urls');",
+									"    pm.expect(jsonData).to.have.property('count');",
+									"    pm.expect(jsonData.urls).to.be.an('array');",
+									"    ",
+									"    // Save first URL for example (you can modify this)",
+									"    if (jsonData.urls.length > 0 && jsonData.urls[0].upload_url) {",
+									"        pm.environment.set(\"bulk_upload_url_1\", jsonData.urls[0].upload_url);",
+									"        pm.environment.set(\"bulk_object_path_1\", jsonData.urls[0].object_path);",
+									"    }",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "merchant_id",
+									"value": "{{merchant_id}}",
+									"type": "text"
+								},
+								{
+									"key": "files",
+									"value": "[{\"folder\":\"knowledge_base\",\"filename\":\"faq.pdf\",\"content_type\":\"application/pdf\"},{\"folder\":\"knowledge_base\",\"filename\":\"manual.docx\",\"content_type\":\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\"}]",
+									"type": "text",
+									"description": "JSON array of file objects. Each object should have: folder, filename, content_type. Optional: expiration_minutes"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/files/upload-urls",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"files",
+								"upload-urls"
+							]
+						},
+						"description": "Generate multiple signed URLs for bulk file uploads.\n\n**Usage:**\n1. Provide merchant_id\n2. Provide files as JSON array: [{\"folder\":\"knowledge_base\",\"filename\":\"file1.pdf\",\"content_type\":\"application/pdf\"}, ...]\n3. Response contains array of upload URLs\n4. Upload each file to its respective signed URL using PUT request\n\n**Example files JSON:**\n```json\n[\n  {\"folder\":\"knowledge_base\",\"filename\":\"faq.pdf\",\"content_type\":\"application/pdf\"},\n  {\"folder\":\"knowledge_base\",\"filename\":\"manual.docx\",\"content_type\":\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\"},\n  {\"folder\":\"prompt-docs\",\"filename\":\"products.csv\",\"content_type\":\"text/csv\"}\n]\n```"
+					},
+					"response": []
+				},
+				{
+					"name": "Confirm Upload",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test(\"Upload confirmed\", function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.status).to.eql('confirmed');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "object_path",
+									"value": "{{knowledge_object_path}}",
+									"type": "text",
+									"description": "Use object_path from upload-url response"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/files/confirm",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"files",
+								"confirm"
+							]
+						},
+						"description": "Confirm that a file was uploaded successfully to GCS"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Onboarding",
+			"item": [
+				{
+					"name": "Start Onboarding",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test(\"Onboarding started\", function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.status).to.eql('started');",
+									"    pm.expect(jsonData).to.have.property('job_id');",
+									"    pm.expect(jsonData).to.have.property('merchant_id');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"merchant_id\": \"{{merchant_id}}\",\n    \"user_id\": \"{{user_id}}\",\n    \"shop_name\": \"My Awesome Store\",\n    \"shop_url\": \"https://example.myshopify.com\",\n    \"bot_name\": \"AI Shopping Assistant\",\n    \"target_customer\": \"Tech-savvy millennials interested in sustainable products\",\n    \"top_questions\": \"What are your return policies? How long does shipping take?\",\n    \"top_products\": \"Best sellers: Product A, Product B, Product C\",\n    \"primary_color\": \"#667eea\",\n    \"secondary_color\": \"#764ba2\",\n    \"logo_url\": \"https://example.com/logo.png\",\n    \"file_paths\": {\n        \"knowledge\": [\n            \"merchants/{{merchant_id}}/knowledge_base/knowledge-base.pdf\"\n        ],\n        \"products\": \"merchants/{{merchant_id}}/prompt-docs/products.csv\",\n        \"logo\": \"merchants/{{merchant_id}}/brand-images/logo.png\"\n    }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/onboard",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"onboard"
+							]
+						},
+						"description": "Start the merchant onboarding process. This will:\n1. Create folder structure\n2. Process products file\n3. Convert documents\n4. Setup Vertex AI Search datastore\n5. Generate merchant config\n\nNote: Files should be uploaded first using /files/upload-url endpoint"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Onboarding Status",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test(\"Status response has required fields\", function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData).to.have.property('merchant_id');",
+									"    pm.expect(jsonData).to.have.property('status');",
+									"    pm.expect(jsonData).to.have.property('steps');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/onboard-status/{{merchant_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"onboard-status",
+								"{{merchant_id}}"
+							]
+						},
+						"description": "Get the current status of the onboarding process for a merchant"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Complete Workflow Example",
+			"item": [
+				{
+					"name": "1. Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/health",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"health"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "2. Get Upload URL for Knowledge Base",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "merchant_id",
+									"value": "{{merchant_id}}",
+									"type": "text"
+								},
+								{
+									"key": "folder",
+									"value": "knowledge_base",
+									"type": "text"
+								},
+								{
+									"key": "filename",
+									"value": "faq.pdf",
+									"type": "text"
+								},
+								{
+									"key": "content_type",
+									"value": "application/pdf",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/files/upload-url",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"files",
+								"upload-url"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "2b. Upload Knowledge Base File to GCS",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/pdf"
+							}
+						],
+						"body": {
+							"mode": "file",
+							"file": {
+								"src": ""
+							}
+						},
+						"url": {
+							"raw": "{{knowledge_upload_url}}",
+							"host": [
+								"{{knowledge_upload_url}}"
+							]
+						},
+						"description": "Upload your knowledge base file (PDF, DOCX, etc.) to GCS using the signed URL from step 2. Select your file in the Body tab."
+					},
+					"response": []
+				},
+				{
+					"name": "3. Get Upload URL for Products",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "merchant_id",
+									"value": "{{merchant_id}}",
+									"type": "text"
+								},
+								{
+									"key": "folder",
+									"value": "prompt-docs",
+									"type": "text"
+								},
+								{
+									"key": "filename",
+									"value": "products.csv",
+									"type": "text"
+								},
+								{
+									"key": "content_type",
+									"value": "text/csv",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/files/upload-url",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"files",
+								"upload-url"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "3b. Upload Products File to GCS",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "text/csv"
+							}
+						],
+						"body": {
+							"mode": "file",
+							"file": {
+								"src": ""
+							}
+						},
+						"url": {
+							"raw": "{{products_upload_url}}",
+							"host": [
+								"{{products_upload_url}}"
+							]
+						},
+						"description": "Upload your products CSV/XLSX file to GCS using the signed URL from step 3. Select your file in the Body tab."
+					},
+					"response": []
+				},
+				{
+					"name": "4. Start Onboarding",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"merchant_id\": \"{{merchant_id}}\",\n    \"user_id\": \"{{user_id}}\",\n    \"shop_name\": \"Example Store\",\n    \"shop_url\": \"https://example.myshopify.com\",\n    \"bot_name\": \"AI Assistant\",\n    \"file_paths\": {\n        \"knowledge\": [\n            \"merchants/{{merchant_id}}/knowledge_base/faq.pdf\"\n        ],\n        \"products\": \"merchants/{{merchant_id}}/prompt-docs/products.csv\"\n    }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/onboard",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"onboard"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "5. Check Status",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/onboard-status/{{merchant_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"onboard-status",
+								"{{merchant_id}}"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Bulk Upload Workflow Example",
+			"item": [
+				{
+					"name": "1. Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/health",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"health"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "2. Get Bulk Upload URLs",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "merchant_id",
+									"value": "{{merchant_id}}",
+									"type": "text"
+								},
+								{
+									"key": "files",
+									"value": "[{\"folder\":\"knowledge_base\",\"filename\":\"faq.pdf\",\"content_type\":\"application/pdf\"},{\"folder\":\"knowledge_base\",\"filename\":\"manual.docx\",\"content_type\":\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\"},{\"folder\":\"prompt-docs\",\"filename\":\"products.csv\",\"content_type\":\"text/csv\"}]",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/files/upload-urls",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"files",
+								"upload-urls"
+							]
+						},
+						"description": "Get multiple signed URLs at once for bulk file uploads. Update the files JSON array with your actual files."
+					},
+					"response": []
+				},
+				{
+					"name": "3. Upload Files to GCS (Multiple)",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/pdf"
+							}
+						],
+						"body": {
+							"mode": "file",
+							"file": {
+								"src": ""
+							}
+						},
+						"url": {
+							"raw": "{{bulk_upload_url_1}}",
+							"host": [
+								"{{bulk_upload_url_1}}"
+							]
+						},
+						"description": "Upload your first file. Use the upload_url from the bulk response. Repeat this step for each file with its respective upload_url and Content-Type."
+					},
+					"response": []
+				},
+				{
+					"name": "4. Start Onboarding",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"merchant_id\": \"{{merchant_id}}\",\n    \"user_id\": \"{{user_id}}\",\n    \"shop_name\": \"Example Store\",\n    \"shop_url\": \"https://example.myshopify.com\",\n    \"bot_name\": \"AI Assistant\",\n    \"file_paths\": {\n        \"knowledge\": [\n            \"merchants/{{merchant_id}}/knowledge_base/faq.pdf\",\n            \"merchants/{{merchant_id}}/knowledge_base/manual.docx\"\n        ],\n        \"products\": \"merchants/{{merchant_id}}/prompt-docs/products.csv\"\n    }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/onboard",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"onboard"
+							]
+						},
+						"description": "Start onboarding with multiple knowledge base files. Update file_paths with all uploaded files."
+					},
+					"response": []
+				},
+				{
+					"name": "5. Check Status",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/onboard-status/{{merchant_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"onboard-status",
+								"{{merchant_id}}"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8080",
+			"type": "string"
+		},
+		{
+			"key": "merchant_id",
+			"value": "test-merchant-001",
+			"type": "string"
+		},
+		{
+			"key": "user_id",
+			"value": "test-user-001",
+			"type": "string"
+		}
+	]
+}
+
