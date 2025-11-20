@@ -91,14 +91,19 @@ class OnboardRequest(BaseModel):
     shop_url: str
     bot_name: Optional[str] = "AI Assistant"
     target_customer: Optional[str] = None
-    customer_persona: Optional[str] = None
-    bot_tone: Optional[str] = None
-    prompt_text: Optional[str] = None
     top_questions: Optional[str] = None
     top_products: Optional[str] = None
     primary_color: Optional[str] = "#667eea"
     secondary_color: Optional[str] = "#764ba2"
     logo_url: Optional[str] = None
+    platform: Optional[str] = Field(
+        None,
+        description="E-commerce platform type: 'shopify', 'woocommerce', 'wordpress', or 'custom'. If not provided, will auto-detect from shop_url."
+    )
+    custom_url_pattern: Optional[str] = Field(
+        None,
+        description="Custom URL pattern for 'custom' platform. Use {handle} as placeholder. Example: '/item/{handle}' or '/p/{handle}'"
+    )
     file_paths: Optional[Dict[str, Any]] = Field(
         None,
         description="Optional: File paths are auto-detected from knowledge_base folder. This field is deprecated - all files should be uploaded to knowledge_base/."
@@ -113,14 +118,13 @@ async def process_onboarding(
     shop_url: str,
     bot_name: str,
     target_customer: Optional[str],
-    customer_persona: Optional[str],
-    bot_tone: Optional[str],
-    prompt_text: Optional[str],
     top_questions: Optional[str],
     top_products: Optional[str],
     primary_color: Optional[str],
     secondary_color: Optional[str],
     logo_url: Optional[str],
+    platform: Optional[str],
+    custom_url_pattern: Optional[str],
     file_paths: Optional[Dict[str, Any]]
 ):
     """Background task for processing onboarding"""
@@ -149,10 +153,10 @@ async def process_onboarding(
         knowledge_base_prefix = f"merchants/{merchant_id}/knowledge_base/"
         try:
             files_in_kb = gcs_handler.list_files(knowledge_base_prefix)
-            # Look for products.csv or products.xlsx
+            # Look for products.json, products.csv, or products.xlsx (in that order of preference)
             for file_path in files_in_kb:
                 filename = file_path.split('/')[-1].lower()
-                if filename in ['products.csv', 'products.xlsx', 'products.xls']:
+                if filename in ['products.json', 'products.csv', 'products.xlsx', 'products.xls']:
                     products_file_path = file_path
                     logger.info(f"Found products file in knowledge_base: {products_file_path}")
                     break
@@ -164,7 +168,13 @@ async def process_onboarding(
                 merchant_id, "process_products", StepStatus.IN_PROGRESS
             )
             try:
-                result = product_processor.process_products_file(merchant_id, products_file_path)
+                result = product_processor.process_products_file(
+                    merchant_id, 
+                    products_file_path,
+                    shop_url=shop_url,
+                    platform=platform,
+                    custom_url_pattern=custom_url_pattern
+                )
                 status_tracker.update_step_status(
                     merchant_id, "process_products", StepStatus.COMPLETED,
                     message=f"Processed {result['product_count']} products from {products_file_path}"
@@ -228,7 +238,7 @@ async def process_onboarding(
         knowledge_base_prefix = f"merchants/{merchant_id}/knowledge_base/"
         try:
             files_in_kb = gcs_handler.list_files(knowledge_base_prefix)
-            excluded_files = ['products.csv', 'products.xlsx', 'products.xls', 
+            excluded_files = ['products.json', 'products.csv', 'products.xlsx', 'products.xls', 
                             'categories.csv', 'categories.xlsx', 'categories.xls']
             
             for file_path in files_in_kb:
@@ -388,9 +398,6 @@ async def process_onboarding(
                 shop_url=shop_url,
                 bot_name=bot_name,
                 target_customer=target_customer,
-                customer_persona=customer_persona,
-                bot_tone=bot_tone,
-                prompt_text=prompt_text,
                 top_questions=top_questions,
                 top_products=top_products,
                 primary_color=primary_color,
@@ -634,14 +641,13 @@ async def start_onboarding(
             shop_url=request.shop_url,
             bot_name=request.bot_name,
             target_customer=request.target_customer,
-            customer_persona=request.customer_persona,
-            bot_tone=request.bot_tone,
-            prompt_text=request.prompt_text,
             top_questions=request.top_questions,
             top_products=request.top_products,
             primary_color=request.primary_color,
             secondary_color=request.secondary_color,
             logo_url=request.logo_url,
+            platform=request.platform,
+            custom_url_pattern=request.custom_url_pattern,
             file_paths=request.file_paths
         )
 
