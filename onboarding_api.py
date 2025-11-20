@@ -91,6 +91,9 @@ class OnboardRequest(BaseModel):
     shop_url: str
     bot_name: Optional[str] = "AI Assistant"
     target_customer: Optional[str] = None
+    customer_persona: Optional[str] = None
+    bot_tone: Optional[str] = None
+    prompt_text: Optional[str] = None
     top_questions: Optional[str] = None
     top_products: Optional[str] = None
     primary_color: Optional[str] = "#667eea"
@@ -110,6 +113,9 @@ async def process_onboarding(
     shop_url: str,
     bot_name: str,
     target_customer: Optional[str],
+    customer_persona: Optional[str],
+    bot_tone: Optional[str],
+    prompt_text: Optional[str],
     top_questions: Optional[str],
     top_products: Optional[str],
     primary_color: Optional[str],
@@ -382,6 +388,9 @@ async def process_onboarding(
                 shop_url=shop_url,
                 bot_name=bot_name,
                 target_customer=target_customer,
+                customer_persona=customer_persona,
+                bot_tone=bot_tone,
+                prompt_text=prompt_text,
                 top_questions=top_questions,
                 top_products=top_products,
                 primary_color=primary_color,
@@ -625,6 +634,9 @@ async def start_onboarding(
             shop_url=request.shop_url,
             bot_name=request.bot_name,
             target_customer=request.target_customer,
+            customer_persona=request.customer_persona,
+            bot_tone=request.bot_tone,
+            prompt_text=request.prompt_text,
             top_questions=request.top_questions,
             top_products=request.top_products,
             primary_color=request.primary_color,
