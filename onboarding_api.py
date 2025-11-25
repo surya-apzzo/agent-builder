@@ -92,6 +92,19 @@ app.add_middleware(
 
 
 # Request/Response Models
+def _string_to_array(value: Optional[str]) -> List[str]:
+    """
+    Convert string to array, splitting by newline.
+    Returns empty array if value is None or empty.
+    """
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    # Split by newline and filter out empty strings
+    return [item.strip() for item in value.split('\n') if item.strip()]
+
+
 def generate_merchant_id(shop_name: str) -> str:
     """
     Generate merchant_id from shop_name
@@ -259,21 +272,50 @@ async def process_onboarding(
             )
             raise  # Fail onboarding if database creation fails
         
-        # Step 1: Create folder structure
+        # Step 1: Create folder structure (if not already created)
+        # Folders are typically created in Step 1 (Save AI Persona), but we ensure they exist here
         status_tracker.update_step_status(
             merchant_id, "create_folders", StepStatus.IN_PROGRESS
         )
         try:
-            gcs_handler.create_folder_structure(merchant_id, user_id)
-            update_merchant_onboarding_step(
-                merchant_id=merchant_id,
-                step_name='folders',
-                completed=True
-            )
-            status_tracker.update_step_status(
-                merchant_id, "create_folders", StepStatus.COMPLETED,
-                message="Folder structure created successfully"
-            )
+            # Check if folders were already created (from Step 1)
+            conn = None
+            folders_already_created = False
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT step_folders_created FROM merchants WHERE merchant_id = %s AND user_id = %s",
+                    (merchant_id, user_id)
+                )
+                result = cursor.fetchone()
+                if result and result[0]:
+                    folders_already_created = True
+                cursor.close()
+            except Exception as db_err:
+                logger.warning(f"Could not check folder creation status: {db_err}")
+            finally:
+                if conn:
+                    return_connection(conn)
+            
+            if folders_already_created:
+                logger.info(f"Folders already created for merchant: {merchant_id} (from Step 1)")
+                status_tracker.update_step_status(
+                    merchant_id, "create_folders", StepStatus.COMPLETED,
+                    message="Folder structure already exists (created in Step 1)"
+                )
+            else:
+                # Create folders if they don't exist
+                gcs_handler.create_folder_structure(merchant_id, user_id)
+                update_merchant_onboarding_step(
+                    merchant_id=merchant_id,
+                    step_name='folders',
+                    completed=True
+                )
+                status_tracker.update_step_status(
+                    merchant_id, "create_folders", StepStatus.COMPLETED,
+                    message="Folder structure created successfully"
+                )
         except Exception as e:
             update_merchant_onboarding_step(
                 merchant_id=merchant_id,
@@ -1016,13 +1058,40 @@ async def save_ai_persona(request: SaveAIPersonaRequest):
             if conn:
                 return_connection(conn)
         
+        # Create folder structure immediately after saving AI Persona
+        # This ensures folders exist before file uploads in Step 2
+        try:
+            folder_result = gcs_handler.create_folder_structure(merchant_id, request.user_id)
+            logger.info(f"Folder structure created for merchant: {merchant_id}")
+            
+            # Update database to mark folders as created
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE merchants SET step_folders_created = TRUE, step_folders_created_at = NOW(), updated_at = NOW() WHERE merchant_id = %s AND user_id = %s",
+                    (merchant_id, request.user_id)
+                )
+                conn.commit()
+                cursor.close()
+            except Exception as db_err:
+                logger.warning(f"Failed to update step_folders_created in database: {db_err}")
+            finally:
+                if conn:
+                    return_connection(conn)
+        except Exception as folder_error:
+            # Log error but don't fail the request - folders will be created during onboarding if needed
+            logger.warning(f"Failed to create folder structure for merchant {merchant_id}: {folder_error}")
+            logger.info("Folders will be created during onboarding if needed")
+        
         logger.info(f"AI Persona saved for merchant: {merchant_id}")
         
         return {
             "merchant_id": merchant_id,
             "status": "saved",
             "ai_persona_saved": True,
-            "message": "AI Persona saved successfully. Proceed to Knowledge Base step."
+            "folders_created": True,
+            "message": "AI Persona saved successfully. Folder structure created. Proceed to Knowledge Base step."
         }
     
     except HTTPException:
@@ -1787,7 +1856,80 @@ async def get_merchant_info(merchant_id: str, user_id: str):
         merchant['documents'] = documents
         merchant['documents_count'] = len(documents)
         
-        return merchant
+        # Transform response to match creation format (frontend field names)
+        # Convert database field names to frontend field names
+        response = {
+            # Core fields - use frontend names
+            "merchant_id": merchant.get('merchant_id'),
+            "user_id": merchant.get('user_id'),
+            "store_name": merchant.get('shop_name'),  # shop_name -> store_name
+            "shop_url": merchant.get('shop_url'),
+            "agent_name": merchant.get('bot_name'),  # bot_name -> agent_name
+            "tone_of_voice": merchant.get('bot_tone'),  # bot_tone -> tone_of_voice
+            "system_prompt": merchant.get('prompt_text'),  # prompt_text -> system_prompt
+            "platform": merchant.get('platform'),
+            "custom_url_pattern": merchant.get('custom_url_pattern'),
+            "customer_persona": merchant.get('customer_persona'),
+            "target_customer": merchant.get('target_customer'),
+            
+            # Convert top_questions and top_products from string to array
+            "top_questions": _string_to_array(merchant.get('top_questions')),
+            "top_products": _string_to_array(merchant.get('top_products')),
+            
+            # Branding
+            "primary_color": merchant.get('primary_color'),
+            "secondary_color": merchant.get('secondary_color'),
+            "logo_url": merchant.get('logo_url'),
+            
+            # Custom chatbot fields
+            "chatbot_title": merchant.get('chatbot_title'),
+            "chatbot_logo_signed_url": merchant.get('chatbot_logo_signed_url'),
+            "chatbot_color": merchant.get('chatbot_color'),
+            "chatbot_font_family": merchant.get('chatbot_font_family'),
+            "chatbot_tag_line": merchant.get('chatbot_tag_line'),
+            "chatbot_position": merchant.get('chatbot_position'),
+            
+            # Status fields
+            "status": merchant.get('status'),
+            "onboarding_status": merchant.get('onboarding_status'),
+            "flow_status": merchant.get('flow_status'),
+            
+            # Documents
+            "documents": documents,
+            "documents_count": len(documents),
+            
+            # Knowledge base
+            "knowledge_base_saved": merchant.get('knowledge_base_saved', False),
+            
+            # Timestamps
+            "created_at": merchant.get('created_at'),
+            "updated_at": merchant.get('updated_at'),
+            "last_onboarding_at": merchant.get('last_onboarding_at'),
+            
+            # Vertex AI
+            "vertex_datastore_id": merchant.get('vertex_datastore_id'),
+            "vertex_datastore_status": merchant.get('vertex_datastore_status'),
+            
+            # Config
+            "config_path": merchant.get('config_path'),
+            
+            # Onboarding steps (keep for backward compatibility)
+            "step_merchant_record_completed": merchant.get('step_merchant_record_completed', False),
+            "step_folders_created": merchant.get('step_folders_created', False),
+            "step_products_processed": merchant.get('step_products_processed', False),
+            "step_categories_processed": merchant.get('step_categories_processed', False),
+            "step_documents_converted": merchant.get('step_documents_converted', False),
+            "step_vertex_setup": merchant.get('step_vertex_setup', False),
+            "step_config_generated": merchant.get('step_config_generated', False),
+            "step_onboarding_completed": merchant.get('step_onboarding_completed', False),
+            
+            # Counts
+            "product_count": merchant.get('product_count', 0),
+            "category_count": merchant.get('category_count', 0),
+            "document_count": merchant.get('document_count', 0)
+        }
+        
+        return response
     
     except HTTPException:
         raise
@@ -1818,19 +1960,75 @@ async def list_merchants(user_id: str, status: Optional[str] = None):
         if status:
             merchants = [m for m in merchants if m.get('status') == status or m.get('onboarding_status') == status]
         
-        # Add flow status information
+        # Transform each merchant to match creation format (frontend field names)
+        transformed_merchants = []
         for merchant in merchants:
-            merchant['flow_status'] = {
+            # Add flow status
+            flow_status = {
                 'ai_persona_saved': merchant.get('ai_persona_saved', False),
                 'knowledge_base_saved': merchant.get('knowledge_base_saved', False),
                 'agent_created': merchant.get('agent_created', False),
                 'onboarding_completed': merchant.get('step_onboarding_completed', False)
             }
+            
+            # Transform to frontend field names
+            transformed_merchant = {
+                # Core fields - use frontend names
+                "merchant_id": merchant.get('merchant_id'),
+                "user_id": merchant.get('user_id'),
+                "store_name": merchant.get('shop_name'),  # shop_name -> store_name
+                "shop_url": merchant.get('shop_url'),
+                "agent_name": merchant.get('bot_name'),  # bot_name -> agent_name
+                "tone_of_voice": merchant.get('bot_tone'),  # bot_tone -> tone_of_voice
+                "system_prompt": merchant.get('prompt_text'),  # prompt_text -> system_prompt
+                "platform": merchant.get('platform'),
+                "custom_url_pattern": merchant.get('custom_url_pattern'),
+                "customer_persona": merchant.get('customer_persona'),
+                "target_customer": merchant.get('target_customer'),
+                
+                # Convert top_questions and top_products from string to array
+                "top_questions": _string_to_array(merchant.get('top_questions')),
+                "top_products": _string_to_array(merchant.get('top_products')),
+                
+                # Branding
+                "primary_color": merchant.get('primary_color'),
+                "secondary_color": merchant.get('secondary_color'),
+                "logo_url": merchant.get('logo_url'),
+                
+                # Custom chatbot fields
+                "chatbot_title": merchant.get('chatbot_title'),
+                "chatbot_logo_signed_url": merchant.get('chatbot_logo_signed_url'),
+                "chatbot_color": merchant.get('chatbot_color'),
+                "chatbot_font_family": merchant.get('chatbot_font_family'),
+                "chatbot_tag_line": merchant.get('chatbot_tag_line'),
+                "chatbot_position": merchant.get('chatbot_position'),
+                
+                # Status fields
+                "status": merchant.get('status'),
+                "onboarding_status": merchant.get('onboarding_status'),
+                "flow_status": flow_status,
+                
+                # Knowledge base
+                "knowledge_base_saved": merchant.get('knowledge_base_saved', False),
+                
+                # Timestamps
+                "created_at": merchant.get('created_at'),
+                "updated_at": merchant.get('updated_at'),
+                "last_onboarding_at": merchant.get('last_onboarding_at'),
+                
+                # Vertex AI
+                "vertex_datastore_id": merchant.get('vertex_datastore_id'),
+                "vertex_datastore_status": merchant.get('vertex_datastore_status'),
+                
+                # Config
+                "config_path": merchant.get('config_path')
+            }
+            transformed_merchants.append(transformed_merchant)
         
         return {
             "user_id": user_id,
-            "count": len(merchants),
-            "merchants": merchants
+            "count": len(transformed_merchants),
+            "merchants": transformed_merchants
         }
     
     except Exception as e:

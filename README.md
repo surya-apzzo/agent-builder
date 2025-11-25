@@ -4,9 +4,13 @@ A standalone FastAPI microservice for merchant onboarding in a multi-merchant ch
 
 ## 📚 Documentation
 
+- **[For Developers: Database Setup](./FOR_DEVELOPERS.md)** - **Quick setup guide for developers** ⚡
 - **[Agent Creation Workflow](./AGENT_CREATION_WORKFLOW.md)** - Complete multi-step workflow guide for creating agents
+- **[Database Setup Guide](./DATABASE_SETUP.md)** - Detailed database setup documentation
+- **[Quick Start: Database](./QUICK_START_DATABASE.md)** - Fast database setup reference
 - **[Database Schema](./DATABASE_SCHEMA.md)** - Database schema documentation
 - **[Testing Checklist](./TESTING_CHECKLIST.md)** - Comprehensive testing guide
+- **[Execution Guide](./EXECUTION_GUIDE.md)** - Step-by-step setup and testing instructions
 
 ## Features
 
@@ -78,6 +82,11 @@ Merchant ID is auto-generated from Store Name:
 #### `POST /agents/ai-persona`
 Save AI Persona (Step 1) - Build Your Own AI Agent form data.
 
+**What it does:**
+- Saves AI Persona configuration
+- **Creates folder structure automatically** (folders ready for file uploads in Step 2)
+- Sets `ai_persona_saved = TRUE` and `step_folders_created = TRUE`
+
 **Request:**
 ```json
 {
@@ -105,7 +114,8 @@ Save AI Persona (Step 1) - Build Your Own AI Agent form data.
   "merchant_id": "my-store-name",
   "status": "saved",
   "ai_persona_saved": true,
-  "message": "AI Persona saved successfully. Proceed to Knowledge Base step."
+  "folders_created": true,
+  "message": "AI Persona saved successfully. Folder structure created. Proceed to Knowledge Base step."
 }
 ```
 
