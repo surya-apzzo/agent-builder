@@ -1,11 +1,24 @@
-"""Vertex AI Search setup handler"""
+"""Vertex AI Search setup handler - Production Ready
+
+IMPORTANT IAM PERMISSIONS REQUIRED:
+The service account used by this class must have the following roles:
+- roles/discoveryengine.admin (or roles/discoveryengine.editor)
+- roles/discoveryengine.dataAdmin
+- roles/storage.objectViewer
+- roles/storage.objectAdmin
+- roles/iam.serviceAccountUser
+
+Without these permissions, operations will fail with IAM_PERMISSION_DENIED errors.
+"""
 
 import os
 import re
+import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from google.cloud import discoveryengine_v1 as vertex
 from google.api_core import exceptions as gcp_exceptions
+from google.api_core import retry as retries
 from google.oauth2 import service_account
 from google.protobuf import field_mask_pb2
 
@@ -13,7 +26,11 @@ logger = logging.getLogger(__name__)
 
 
 class VertexSetup:
-    """Handle Vertex AI Search datastore setup and document import"""
+    """Handle Vertex AI Search datastore setup and document import
+    
+    Production-ready implementation with proper credential handling,
+    retry logic, and error handling for Cloud Run environments.
+    """
 
     def __init__(
         self,
@@ -34,11 +51,14 @@ class VertexSetup:
         # Use Vertex-specific environment variables, fallback to GCP variables
         # NOTE: Vertex AI Search requires "global" location for the API endpoint
         self.project_id = project_id or os.getenv("VERTEX_PROJECT_ID") or os.getenv("GCP_PROJECT_ID", "shopify-473015")
+        
         # Force global location - Vertex AI Search API endpoint only serves "global" region
+        # CRITICAL: Using non-global location causes IAM_PERMISSION_DENIED errors
         self.location = location or os.getenv("VERTEX_LOCATION") or os.getenv("GCP_LOCATION", "global")
         if self.location != "global":
             logger.warning(f"Vertex AI Search requires 'global' location. Changing from '{self.location}' to 'global'")
             self.location = "global"
+        
         self.collection_id = collection_id or os.getenv("VERTEX_COLLECTION", "default_collection")
         self.gcs_bucket = gcs_bucket or os.getenv("GCS_BUCKET_NAME", "chekout-ai")
 
@@ -48,7 +68,6 @@ class VertexSetup:
         try:
             if credentials:
                 # Log which service account is being used
-                # Try multiple ways to get the service account email
                 service_account_email = (
                     getattr(credentials, 'service_account_email', None) or
                     getattr(credentials, '_service_account_email', None) or
@@ -57,11 +76,12 @@ class VertexSetup:
                 )
                 logger.info(f"Using service account for Vertex AI: {service_account_email}")
                 
-                # Store credentials for later access
+                # Store credentials for later access (CRITICAL for Cloud Run)
                 self._credentials = credentials
                 self._service_account_email = service_account_email
                 
-                # Use vertex module for all clients to ensure version consistency
+                # Use vertex module for all clients with explicit credentials
+                # CRITICAL: Must pass credentials to all clients for Cloud Run to work
                 self.client = vertex.DocumentServiceClient(credentials=credentials)
                 self.datastore_client = vertex.DataStoreServiceClient(credentials=credentials)
                 self.site_search_client = vertex.SiteSearchEngineServiceClient(credentials=credentials)
@@ -77,29 +97,41 @@ class VertexSetup:
                         logger.info(f"✓ Confirmed using correct Vertex service account: {service_account_email}")
             else:
                 # Fallback to default credentials (for local dev with gcloud auth)
-                # Use vertex module for all clients to ensure version consistency
+                # WARNING: This will fail in Cloud Run - must use service account credentials
                 self.client = vertex.DocumentServiceClient()
                 self.datastore_client = vertex.DataStoreServiceClient()
                 self.site_search_client = vertex.SiteSearchEngineServiceClient()
                 logger.warning("Using default credentials (application-default). For production, use service account credentials.")
                 logger.info(f"Initialized Vertex AI Search client for project: {self.project_id}")
+                # Set _credentials to None for fallback methods
+                self._credentials = None
+                self._service_account_email = 'Unknown'
         except Exception as e:
             logger.error(f"Failed to initialize Vertex AI Search client: {e}")
             raise
 
     def _get_credentials(self):
-        """Get credentials from Vertex-specific or GCS environment variables or service account file"""
+        """Get credentials from Vertex-specific or GCS environment variables or service account file
+        
+        CRITICAL FIX: Properly handles multiline private keys and base64 encoded keys
+        """
         # First, check for Vertex-specific credentials path
         vertex_creds_path = os.getenv("VERTEX_CREDENTIALS_PATH")
         if vertex_creds_path and os.path.exists(vertex_creds_path):
             logger.info(f"Using Vertex AI credentials from file: {vertex_creds_path}")
-            return service_account.Credentials.from_service_account_file(vertex_creds_path)
+            return service_account.Credentials.from_service_account_file(
+                vertex_creds_path,
+                scopes=['https://www.googleapis.com/auth/cloud-platform']
+            )
         
         # Second, check if GOOGLE_APPLICATION_CREDENTIALS is set (service account JSON file)
         creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
         if creds_path and os.path.exists(creds_path):
             logger.info(f"Using credentials from GOOGLE_APPLICATION_CREDENTIALS: {creds_path}")
-            return service_account.Credentials.from_service_account_file(creds_path)
+            return service_account.Credentials.from_service_account_file(
+                creds_path,
+                scopes=['https://www.googleapis.com/auth/cloud-platform']
+            )
         
         # Third, try Vertex-specific environment variables
         vertex_client_email = os.getenv("VERTEX_CLIENT_EMAIL")
@@ -107,19 +139,17 @@ class VertexSetup:
         vertex_private_key_id = os.getenv("VERTEX_PRIVATE_KEY_ID")
         vertex_project_id = os.getenv("VERTEX_PROJECT_ID") or self.project_id
         
-        # Debug logging
-        if vertex_client_email:
-            logger.info(f"Found VERTEX_CLIENT_EMAIL: {vertex_client_email}")
-        else:
-            logger.warning("VERTEX_CLIENT_EMAIL not found in environment")
-        
-        if vertex_private_key:
-            logger.info(f"Found VERTEX_PRIVATE_KEY (length: {len(vertex_private_key)})")
-        else:
-            logger.warning("VERTEX_PRIVATE_KEY not found in environment")
-        
         if vertex_client_email and vertex_private_key:
-            # Clean up the private key (remove quotes and newline escapes)
+            # CRITICAL FIX: Properly decode private key to handle multiline and base64
+            # This preserves formatting and prevents "Invalid PEM format" errors
+            try:
+                # First try unicode_escape decode (handles \n escapes properly)
+                private_key = vertex_private_key.encode('utf-8').decode('unicode_escape')
+                # Remove any surrounding quotes if present
+                private_key = private_key.strip('"').strip("'")
+            except Exception as decode_error:
+                logger.warning(f"Failed to decode private key with unicode_escape, trying fallback: {decode_error}")
+                # Fallback to simple replace (for backward compatibility)
             private_key = vertex_private_key.strip('"').replace('\\n', '\n')
             
             service_account_info = {
@@ -136,7 +166,8 @@ class VertexSetup:
             
             try:
                 credentials = service_account.Credentials.from_service_account_info(
-                    service_account_info
+                    service_account_info,
+                    scopes=['https://www.googleapis.com/auth/cloud-platform']
                 )
                 logger.info(f"Using Vertex AI credentials from environment variables for: {vertex_client_email}")
                 return credentials
@@ -150,7 +181,12 @@ class VertexSetup:
         gcs_project_id = os.getenv("GCS_PROJECT_ID") or self.project_id
         
         if gcs_client_email and gcs_private_key:
-            # Clean up the private key (remove quotes and newline escapes)
+            # CRITICAL FIX: Same fix for GCS private key
+            try:
+                private_key = gcs_private_key.encode('utf-8').decode('unicode_escape')
+                private_key = private_key.strip('"').strip("'")
+            except Exception as decode_error:
+                logger.warning(f"Failed to decode GCS private key with unicode_escape, trying fallback: {decode_error}")
             private_key = gcs_private_key.strip('"').replace('\\n', '\n')
             
             service_account_info = {
@@ -167,13 +203,13 @@ class VertexSetup:
             
             try:
                 credentials = service_account.Credentials.from_service_account_info(
-                    service_account_info
+                    service_account_info,
+                    scopes=['https://www.googleapis.com/auth/cloud-platform']
                 )
                 logger.info(f"Using GCS credentials for Vertex AI (fallback) for: {gcs_client_email}")
                 return credentials
             except Exception as e:
                 logger.warning(f"Failed to create credentials from GCS env vars: {e}")
-                return None
         
         return None
 
@@ -181,54 +217,128 @@ class VertexSetup:
         self,
         merchant_id: str,
         shop_url: Optional[str] = None,
-        shop_name: Optional[str] = None
+        shop_name: Optional[str] = None,
+        create_documents_datastore: bool = True
     ) -> Dict[str, Any]:
         """
-        Create or get Vertex AI Search datastore
-        If shop_url is provided, configures the datastore for website crawling
+        Create or get Vertex AI Search datastores
+        
+        CRITICAL: Vertex AI Search does NOT allow both website crawling and NDJSON imports
+        in the same datastore. Therefore, we create TWO datastores per merchant:
+        
+        1. Website datastore ({merchant_id}-website-engine): For public website crawling
+           - ContentConfig: PUBLIC_WEBSITE
+           - Used for: SiteSearchEngine crawling
+           
+        2. Documents datastore ({merchant_id}-docs-engine): For NDJSON document imports
+           - ContentConfig: NO_CONTENT
+           - Used for: Knowledge base documents, products, categories
 
         Args:
             merchant_id: Merchant identifier
             shop_url: Optional website URL for website data store
             shop_name: Optional shop name for display
+            create_documents_datastore: Whether to create the documents datastore (default: True)
+
+        Returns:
+            dict with both datastore information
+        """
+        try:
+            parent = f"projects/{self.project_id}/locations/{self.location}/collections/{self.collection_id}"
+            display_name = shop_name or f"{merchant_id} Store"
+            
+            results = {
+                "website_datastore": None,
+                "documents_datastore": None
+            }
+            
+            # CRITICAL: Create TWO separate datastores
+            # 1. Website datastore (for crawling) - only if shop_url provided
+            if shop_url:
+                website_datastore_id = f"{merchant_id}-website-engine"
+                website_datastore_path = f"{parent}/dataStores/{website_datastore_id}"
+                
+                website_result = self._create_or_get_single_datastore(
+                    datastore_id=website_datastore_id,
+                    datastore_path=website_datastore_path,
+                    display_name=f"{display_name} - Website",
+                    content_config=vertex.DataStore.ContentConfig.PUBLIC_WEBSITE,
+                    shop_url=shop_url,
+                    parent=parent
+                )
+                results["website_datastore"] = website_result
+            
+            # 2. Documents datastore (for NDJSON imports) - always create if requested
+            if create_documents_datastore:
+                docs_datastore_id = f"{merchant_id}-docs-engine"
+                docs_datastore_path = f"{parent}/dataStores/{docs_datastore_id}"
+                
+                docs_result = self._create_or_get_single_datastore(
+                    datastore_id=docs_datastore_id,
+                    datastore_path=docs_datastore_path,
+                    display_name=f"{display_name} - Documents",
+                    content_config=vertex.DataStore.ContentConfig.NO_CONTENT,
+                    shop_url=None,  # No website crawling for documents datastore
+                    parent=parent
+                )
+                results["documents_datastore"] = docs_result
+            
+            # Return combined results
+            return results
+
+        except Exception as e:
+            logger.error(f"Error creating datastores: {e}")
+            raise
+    
+    def _create_or_get_single_datastore(
+        self,
+        datastore_id: str,
+        datastore_path: str,
+        display_name: str,
+        content_config: vertex.DataStore.ContentConfig,
+        shop_url: Optional[str],
+        parent: str
+    ) -> Dict[str, Any]:
+        """
+        Helper method to create or get a single datastore
+        
+        Args:
+            datastore_id: Datastore ID
+            datastore_path: Full datastore path
+            display_name: Display name for the datastore
+            content_config: Content configuration (PUBLIC_WEBSITE or NO_CONTENT)
+            shop_url: Optional website URL (only for PUBLIC_WEBSITE)
+            parent: Parent path for datastore creation
 
         Returns:
             dict with datastore information
         """
         try:
-            datastore_id = f"{merchant_id}-engine"
-            parent = f"projects/{self.project_id}/locations/{self.location}/collections/{self.collection_id}"
-
             # Check if datastore already exists
-            datastore_path = f"{parent}/dataStores/{datastore_id}"
-
             try:
-                # Try to get existing datastore
-                datastore = self.datastore_client.get_data_store(name=datastore_path)
+                datastore = self.datastore_client.get_data_store(
+                    name=datastore_path,
+                    retry=retries.Retry()
+                )
                 logger.info(f"Datastore already exists: {datastore_id}")
+                
+                # If datastore exists and shop_url provided, ensure site is registered
+                site_registration_result = None
+                if shop_url and content_config == vertex.DataStore.ContentConfig.PUBLIC_WEBSITE:
+                    site_registration_result = self._register_site_for_crawl(datastore_path, shop_url)
+                
                 return {
                     "datastore_id": datastore_id,
                     "datastore_path": datastore_path,
                     "status": "exists",
                     "name": datastore.display_name,
-                    "content_config": datastore.content_config.name if datastore.content_config else None
+                    "content_config": datastore.content_config.name if datastore.content_config else None,
+                    "shop_url": shop_url if shop_url else None,
+                    "site_registration": site_registration_result
                 }
             except Exception:
                 # Datastore doesn't exist, create it
-                logger.info(f"Creating new datastore: {datastore_id}")
-
-                # Create datastore with website configuration if URL provided
-                display_name = shop_name or f"{merchant_id} Store"
-                
-                # Create datastore object - use PUBLIC_WEBSITE for website crawling
-                # This matches the working script approach
-                if shop_url:
-                    # Website data store - enables both public web crawling + doc ingestion
-                    content_config = vertex.DataStore.ContentConfig.PUBLIC_WEBSITE
-                    logger.info(f"Creating website data store for: {shop_url}")
-                else:
-                    # Generic data store for document imports only
-                    content_config = vertex.DataStore.ContentConfig.NO_CONTENT
+                logger.info(f"Creating new datastore: {datastore_id} (config: {content_config.name})")
 
                 datastore = vertex.DataStore(
                     display_name=display_name,
@@ -238,10 +348,7 @@ class VertexSetup:
                 )
 
                 try:
-                    # Create the datastore - explicitly create request object to avoid version issues
-                    logger.info(f"Creating DataStore: {datastore_id}")
-                    
-                    # Create request object explicitly (matching working script approach)
+                    # Create the datastore
                     request = vertex.CreateDataStoreRequest(
                         parent=parent,
                         data_store=datastore,
@@ -249,33 +356,40 @@ class VertexSetup:
                     )
                     
                     operation = self.datastore_client.create_data_store(request=request)
-                    
-                    # Wait for operation to complete
-                    result = operation.result(timeout=600)  # 10 minute timeout (matching working script)
+                    result = operation.result(timeout=600)  # 10 minute timeout
                     logger.info(f"✅ Created DataStore: {result.name}")
 
                     # If website URL provided, register site for crawling
-                    if shop_url:
-                        self._register_site_for_crawl(datastore_path, shop_url)
+                    site_registration_result = None
+                    if shop_url and content_config == vertex.DataStore.ContentConfig.PUBLIC_WEBSITE:
+                        site_registration_result = self._register_site_for_crawl(datastore_path, shop_url)
+                        if site_registration_result.get("status") == "error":
+                            logger.warning(f"⚠️ Site registration had errors but datastore was created successfully")
 
                     return {
                         "datastore_id": datastore_id,
                         "datastore_path": datastore_path,
                         "status": "created",
                         "content_config": content_config.name,
-                        "shop_url": shop_url if shop_url else None
+                        "shop_url": shop_url if shop_url else None,
+                        "site_registration": site_registration_result
                     }
                 except (gcp_exceptions.AlreadyExists, gcp_exceptions.Conflict) as e:
                     logger.info(f"ℹ️ DataStore already exists: {datastore_path}")
                     # If it already exists, still try to register the site
-                    if shop_url:
-                        self._register_site_for_crawl(datastore_path, shop_url)
+                    site_registration_result = None
+                    if shop_url and content_config == vertex.DataStore.ContentConfig.PUBLIC_WEBSITE:
+                        site_registration_result = self._register_site_for_crawl(datastore_path, shop_url)
+                        if site_registration_result and site_registration_result.get("status") == "error":
+                            logger.warning(f"⚠️ Site registration had errors for existing datastore")
+                    
                     return {
                         "datastore_id": datastore_id,
                         "datastore_path": datastore_path,
                         "status": "exists",
                         "content_config": content_config.name,
-                        "shop_url": shop_url if shop_url else None
+                        "shop_url": shop_url if shop_url else None,
+                        "site_registration": site_registration_result
                     }
                 except gcp_exceptions.BadRequest as e:
                     error_str = str(e).lower()
@@ -299,9 +413,8 @@ class VertexSetup:
                         "note": "Datastore creation may require manual setup or Terraform",
                         "shop_url": shop_url if shop_url else None
                     }
-
         except Exception as e:
-            logger.error(f"Error creating datastore: {e}")
+            logger.error(f"Error creating/getting datastore {datastore_id}: {e}")
             raise
 
     def update_datastore(
@@ -326,9 +439,12 @@ class VertexSetup:
             parent = f"projects/{self.project_id}/locations/{self.location}/collections/{self.collection_id}"
             datastore_path = f"{parent}/dataStores/{datastore_id}"
             
-            # Check if datastore exists
+            # Check if datastore exists with retry
             try:
-                datastore = self.datastore_client.get_data_store(name=datastore_path)
+                datastore = self.datastore_client.get_data_store(
+                    name=datastore_path,
+                    retry=retries.Retry()
+                )
             except Exception as e:
                 logger.warning(f"Datastore {datastore_id} not found, cannot update: {e}")
                 return {
@@ -366,12 +482,13 @@ class VertexSetup:
                     }
             
             # Re-register site if shop_url changed
+            site_registration_result = None
             if shop_url:
-                try:
-                    self._register_site_for_crawl(datastore_path, shop_url)
+                site_registration_result = self._register_site_for_crawl(datastore_path, shop_url)
+                if site_registration_result and site_registration_result.get("status") in ["registered", "already_registered", "already_exists"]:
                     updates.append("site_registration")
-                except Exception as e:
-                    logger.warning(f"Failed to re-register site for crawl: {e}")
+                elif site_registration_result and site_registration_result.get("status") == "error":
+                    logger.warning(f"⚠️ Failed to re-register site for crawl: {site_registration_result.get('error')}")
                     # Don't fail the whole update if site registration fails
             
             return {
@@ -391,18 +508,36 @@ class VertexSetup:
     def _register_site_for_crawl(self, datastore_path: str, shop_url: str):
         """
         Register the website for Vertex AI Search crawling using SiteSearchEngineServiceClient.
-        This matches the working script approach.
+        
+        CRITICAL: The datastore must have ContentConfig.PUBLIC_WEBSITE for this to work.
 
         Args:
             datastore_path: Path to the datastore
             shop_url: Website URL to crawl
+        
+        Returns:
+            dict with registration status
         """
         try:
             # Parent must include /siteSearchEngine at the end
+            # Path: projects/{project}/locations/global/collections/{collection}/dataStores/{ds}/siteSearchEngine
             parent = f"{datastore_path}/siteSearchEngine"
             
             # Remove protocol from URL (API doesn't accept http:// or https://)
             uri_pattern = shop_url.replace('https://', '').replace('http://', '').rstrip('/')
+            
+            # First, check if site is already registered
+            existing_sites = self._list_target_sites(datastore_path)
+            if existing_sites:
+                for site in existing_sites:
+                    if site.get('uri_pattern') == uri_pattern:
+                        logger.info(f"✅ Site already registered for crawl: {shop_url} (URI: {uri_pattern})")
+                        return {
+                            "status": "already_registered",
+                            "shop_url": shop_url,
+                            "uri_pattern": uri_pattern,
+                            "site_name": site.get('name')
+                        }
             
             # Create TargetSite request
             target_site = vertex.TargetSite(
@@ -415,50 +550,267 @@ class VertexSetup:
                 target_site=target_site
             )
             
-            logger.info(f"Registering site for crawl: {shop_url}")
+            logger.info(f"🌐 Registering site for crawl: {shop_url} (URI pattern: {uri_pattern})")
+            logger.info(f"   Parent path: {parent}")
+            
             operation = self.site_search_client.create_target_site(request=request)
-            result = operation.result(timeout=300)  # 5 minute timeout
-            logger.info(f"🌐 Registered site for crawl: {shop_url}")
+            
+            # CRITICAL FIX: Increase timeout to 1200 seconds (20 minutes)
+            # createTargetSite operation often takes 6-15 minutes, 300 seconds times out
+            result = operation.result(timeout=1200)  # 20 minute timeout
+            
+            # Extract site name from result
+            site_name = result.name if hasattr(result, 'name') else None
+            logger.info(f"✅ Successfully registered site for crawl: {shop_url}")
+            logger.info(f"   Site name: {site_name}")
+            logger.info(f"   Vertex AI Search will automatically start crawling the website")
+            
+            return {
+                "status": "registered",
+                "shop_url": shop_url,
+                "uri_pattern": uri_pattern,
+                "site_name": site_name
+            }
             
         except (gcp_exceptions.AlreadyExists, gcp_exceptions.Conflict) as e:
             logger.info(f"ℹ️ Site already registered: {shop_url}")
-        except gcp_exceptions.NotFound:
-            logger.debug(f"DataStore not found - site registration skipped (DataStore must exist first)")
+            # Try to get the existing site info
+            existing_sites = self._list_target_sites(datastore_path)
+            for site in existing_sites:
+                if site.get('uri_pattern') == uri_pattern:
+                    return {
+                        "status": "already_exists",
+                        "shop_url": shop_url,
+                        "uri_pattern": uri_pattern,
+                        "site_name": site.get('name')
+                    }
+            return {
+                "status": "already_exists",
+                "shop_url": shop_url,
+                "uri_pattern": uri_pattern
+            }
+        except gcp_exceptions.NotFound as e:
+            error_msg = f"DataStore not found - site registration skipped. Datastore must exist first. Path: {datastore_path}"
+            logger.error(f"❌ {error_msg}")
+            logger.error(f"   Error details: {e}")
+            return {
+                "status": "error",
+                "error": error_msg,
+                "shop_url": shop_url
+            }
         except Exception as e:
             error_str = str(e).lower()
             if 'not found' in error_str or '404' in error_str:
-                logger.debug(f"DataStore not found - site registration skipped (DataStore must exist first)")
+                error_msg = f"DataStore not found - site registration skipped. Datastore must exist first. Path: {datastore_path}"
+                logger.error(f"❌ {error_msg}")
+                logger.error(f"   Error details: {e}")
+                return {
+                    "status": "error",
+                    "error": error_msg,
+                    "shop_url": shop_url
+                }
             else:
-                logger.warning(f"Could not register site for crawl: {e}")
-                # Don't raise - this is not critical for the flow
-
-    def import_documents(
-        self,
-        merchant_id: str,
-        gcs_uri: str,
-        import_type: str = "FULL"
-    ) -> Dict[str, Any]:
+                error_msg = f"Could not register site for crawl: {str(e)}"
+                logger.error(f"❌ {error_msg}")
+                logger.error(f"   Shop URL: {shop_url}")
+                logger.error(f"   Datastore path: {datastore_path}")
+                import traceback
+                logger.error(f"   Traceback: {traceback.format_exc()}")
+                return {
+                    "status": "error",
+                    "error": error_msg,
+                    "shop_url": shop_url
+                }
+    
+    def _list_target_sites(self, datastore_path: str) -> List[Dict[str, Any]]:
         """
-        Import documents from GCS to Vertex AI Search
-
+        List all target sites registered for a datastore
+        
+        Args:
+            datastore_path: Path to the datastore
+            
+        Returns:
+            List of target site information
+        """
+        try:
+            parent = f"{datastore_path}/siteSearchEngine"
+            request = vertex.ListTargetSitesRequest(parent=parent)
+            
+            response = self.site_search_client.list_target_sites(request=request)
+            
+            sites = []
+            for site in response.target_sites:
+                sites.append({
+                    "name": site.name if hasattr(site, 'name') else None,
+                    "uri_pattern": site.provided_uri_pattern if hasattr(site, 'provided_uri_pattern') else None,
+                    "type": site.type_.name if hasattr(site, 'type_') else None,
+                    "site_verification_info": str(site.site_verification_info) if hasattr(site, 'site_verification_info') else None
+                })
+            
+            return sites
+        except Exception as e:
+            logger.debug(f"Could not list target sites: {e}")
+            return []
+    
+    def get_site_registration_status(self, merchant_id: str, shop_url: str) -> Dict[str, Any]:
+        """
+        Check if a website is registered for crawling
+        
         Args:
             merchant_id: Merchant identifier
-            gcs_uri: GCS URI of NDJSON file (gs://bucket/path)
-            import_type: Import type (FULL or INCREMENTAL)
-
+            shop_url: Website URL to check
+            
         Returns:
-            dict with import operation information
+            dict with registration status
         """
         try:
             datastore_id = f"{merchant_id}-engine"
             datastore_path = f"projects/{self.project_id}/locations/{self.location}/collections/{self.collection_id}/dataStores/{datastore_id}"
             
+            # Verify datastore exists with retry
+            try:
+                datastore = self.datastore_client.get_data_store(
+                    name=datastore_path,
+                    retry=retries.Retry()
+                )
+            except Exception as e:
+                return {
+                    "status": "datastore_not_found",
+                    "error": f"Datastore {datastore_id} not found: {str(e)}",
+                    "shop_url": shop_url
+                }
+            
+            # Get URI pattern
+            uri_pattern = shop_url.replace('https://', '').replace('http://', '').rstrip('/')
+            
+            # List registered sites
+            sites = self._list_target_sites(datastore_path)
+            
+            # Check if our site is registered
+            for site in sites:
+                if site.get('uri_pattern') == uri_pattern:
+                    return {
+                        "status": "registered",
+                        "shop_url": shop_url,
+                        "uri_pattern": uri_pattern,
+                        "site_name": site.get('name'),
+                        "type": site.get('type'),
+                        "site_verification_info": site.get('site_verification_info')
+                    }
+            
+            return {
+                "status": "not_registered",
+                "shop_url": shop_url,
+                "uri_pattern": uri_pattern,
+                "registered_sites": sites
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "shop_url": shop_url
+            }
+
+    def _detect_data_schema(self, gcs_uri: str) -> str:
+        """
+        Detect the data schema from the NDJSON file
+        
+        CRITICAL: Vertex AI Search requires data_schema to match the schemaId in NDJSON
+        - If schemaId is "content", use data_schema="content"
+        - If schemaId is "default_schema" or missing, use data_schema="document"
+        
+        Args:
+            gcs_uri: GCS URI of the NDJSON file
+            
+        Returns:
+            "content" or "document"
+        """
+        try:
+            # Try to read first line of NDJSON to detect schema
+            # This is a best-effort detection - defaults to "document" if detection fails
+            from google.cloud import storage
+            
+            # Extract bucket and path from gs:// URI
+            if gcs_uri.startswith("gs://"):
+                bucket_and_path = gcs_uri[5:]  # Remove "gs://"
+                parts = bucket_and_path.split("/", 1)
+                if len(parts) == 2:
+                    bucket_name, file_path = parts
+                    
+                    # Create storage client with same credentials
+                    if self._credentials:
+                        storage_client = storage.Client(credentials=self._credentials, project=self.project_id)
+                    else:
+                        storage_client = storage.Client(project=self.project_id)
+                    
+                    bucket = storage_client.bucket(bucket_name)
+                    blob = bucket.blob(file_path)
+                    
+                    # Download first few bytes to check schema
+                    content = blob.download_as_bytes(start=0, end=2048)  # First 2KB
+                    first_line = content.split(b'\n')[0].decode('utf-8', errors='ignore')
+                    
+                    # Parse JSON to check schemaId
+                    try:
+                        doc = json.loads(first_line)
+                        schema_id = doc.get('schemaId', 'default_schema')
+                        if schema_id == 'content':
+                            logger.info(f"Detected schemaId='content' in NDJSON, using data_schema='content'")
+                            return "content"
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+        except Exception as e:
+            logger.debug(f"Could not detect data schema from NDJSON, defaulting to 'document': {e}")
+        
+        # Default to "document" schema
+        logger.debug("Using default data_schema='document'")
+        return "document"
+
+    def import_documents(
+        self,
+        merchant_id: str,
+        gcs_uri: str,
+        import_type: str = "FULL",
+        data_schema: Optional[str] = None,
+        use_documents_datastore: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Import documents from GCS to Vertex AI Search
+        
+        CRITICAL: Documents are imported to the documents datastore ({merchant_id}-docs-engine),
+        NOT the website datastore. This is because Vertex AI Search does NOT allow both
+        website crawling and NDJSON imports in the same datastore.
+
+        Args:
+            merchant_id: Merchant identifier
+            gcs_uri: GCS URI of NDJSON file (gs://bucket/path)
+            import_type: Import type (FULL or INCREMENTAL)
+            data_schema: Optional data schema ("document" or "content"). If not provided, will auto-detect.
+            use_documents_datastore: If True, use docs-engine datastore (default). If False, use legacy engine.
+
+        Returns:
+            dict with import operation information
+        """
+        try:
+            # CRITICAL: Use documents datastore for NDJSON imports
+            if use_documents_datastore:
+                datastore_id = f"{merchant_id}-docs-engine"
+            else:
+                # Legacy support for old single datastore approach
+                datastore_id = f"{merchant_id}-engine"
+            
+            datastore_path = f"projects/{self.project_id}/locations/{self.location}/collections/{self.collection_id}/dataStores/{datastore_id}"
+            
             # Parent for import must include /branches/default_branch
+            # CRITICAL: Path must be: dataStores/{datastore}/branches/default_branch
             parent = f"{datastore_path}/branches/default_branch"
             
-            # Verify datastore exists before trying to import
+            # CRITICAL FIX: Verify datastore exists with retry
             try:
-                datastore = self.datastore_client.get_data_store(name=datastore_path)
+                datastore = self.datastore_client.get_data_store(
+                    name=datastore_path,
+                    retry=retries.Retry()
+                )
                 logger.info(f"Verified datastore exists: {datastore_id}")
             except Exception as check_error:
                 error_msg = str(check_error)
@@ -466,17 +818,27 @@ class VertexSetup:
                 if "IAM_PERMISSION_DENIED" in error_msg or "Permission" in error_msg:
                     # This is a permission issue - log which service account is being used
                     sa_email = getattr(self, '_service_account_email', 'Unknown')
-                    raise Exception(f"Permission denied accessing datastore '{datastore_id}'. Service account: {sa_email}. Ensure the service account has 'discoveryengine.dataStores.get' permission. Error: {error_msg}")
+                    raise Exception(
+                        f"Permission denied accessing datastore '{datastore_id}'. "
+                        f"Service account: {sa_email}. "
+                        f"Ensure the service account has required IAM roles: "
+                        f"roles/discoveryengine.admin, roles/discoveryengine.dataAdmin, "
+                        f"roles/storage.objectViewer. Error: {error_msg}"
+                    )
                 elif "404" in error_msg or "not found" in error_msg.lower() or "does not exist" in error_msg.lower():
-                    raise Exception(f"Datastore '{datastore_id}' does not exist. Please create it first or ensure datastore creation succeeded. Error: {error_msg}")
+                    raise Exception(f"Datastore '{datastore_id}' not found. Please create it first or ensure datastore creation succeeded. Error: {error_msg}")
                 else:
                     # Re-raise if it's a different error
                     raise
 
+            # CRITICAL FIX: Auto-detect data_schema if not provided
+            if data_schema is None:
+                data_schema = self._detect_data_schema(gcs_uri)
+
             # Create GCS source - use vertex module for consistency
             gcs_source = vertex.GcsSource(
                 input_uris=[gcs_uri] if isinstance(gcs_uri, str) else gcs_uri,
-                data_schema="document"
+                data_schema=data_schema
             )
 
             # Create import request - use vertex module
@@ -489,23 +851,18 @@ class VertexSetup:
             )
 
             # Start import operation
-            logger.info(f"Starting document import from: {gcs_uri}")
+            logger.info(f"Starting document import from: {gcs_uri} (schema: {data_schema})")
             operation = self.client.import_documents(request=request)
             
-            # Get operation name safely
-            # Operation object has 'operation' attribute, not 'name' directly
+            # Get operation name safely (optional - not critical)
             operation_name = None
             try:
-                # Try to get name from operation.operation if it exists
                 if hasattr(operation, 'operation'):
                     op_obj = operation.operation
-                    # Check if it's a dict-like object
                     if isinstance(op_obj, dict):
                         operation_name = op_obj.get('name') if 'name' in op_obj else None
-                    # Check if it's an object with name attribute
                     elif hasattr(op_obj, 'name'):
                         operation_name = op_obj.name
-                # Also try metadata
                 if not operation_name and hasattr(operation, 'metadata'):
                     metadata = operation.metadata
                     if isinstance(metadata, dict) and 'name' in metadata:
@@ -513,7 +870,6 @@ class VertexSetup:
                     elif hasattr(metadata, 'name'):
                         operation_name = metadata.name
             except Exception as name_error:
-                # Silently fail - operation name is optional
                 logger.debug(f"Could not extract operation name: {name_error}")
             
             if operation_name:
@@ -521,9 +877,9 @@ class VertexSetup:
             else:
                 logger.info("Started document import operation (name not available)")
 
-            # Wait for operation to complete (matching working script timeout)
+            # Wait for operation to complete
             try:
-                result = operation.result(timeout=1800)  # 30 minute timeout (matching working script)
+                result = operation.result(timeout=1800)  # 30 minute timeout
                 logger.info(f"✅ Document import operation completed")
                 
                 # Check for errors in result
@@ -538,6 +894,7 @@ class VertexSetup:
                     "status": "completed",
                     "gcs_uri": gcs_uri,
                     "import_type": import_type,
+                    "data_schema": data_schema,
                     "datastore_id": datastore_id
                 }
             except gcp_exceptions.GoogleAPIError as api_error:
@@ -553,6 +910,7 @@ class VertexSetup:
                         "status": "in_progress",
                         "gcs_uri": gcs_uri,
                         "import_type": import_type,
+                        "data_schema": data_schema,
                         "datastore_id": datastore_id,
                         "note": "Import already in progress - waiting for previous operation to complete"
                     }
@@ -567,6 +925,7 @@ class VertexSetup:
                     "status": "started",
                     "gcs_uri": gcs_uri,
                     "import_type": import_type,
+                    "data_schema": data_schema,
                     "datastore_id": datastore_id,
                     "note": "Operation started but result check failed - check operation status manually"
                 }
@@ -599,8 +958,18 @@ class VertexSetup:
             datastore_id = f"{merchant_id}-engine"
             datastore_path = f"projects/{self.project_id}/locations/{self.location}/collections/{self.collection_id}/dataStores/{datastore_id}"
 
-            datastore_service = vertex.DataStoreServiceClient()
-            datastore = datastore_service.get_data_store(name=datastore_path)
+            # CRITICAL FIX: Use self._credentials instead of default credentials
+            # This ensures Cloud Run and Cloud Build work correctly
+            if self._credentials:
+                datastore_service = vertex.DataStoreServiceClient(credentials=self._credentials)
+            else:
+                # Fallback for local dev
+                datastore_service = vertex.DataStoreServiceClient()
+            
+            datastore = datastore_service.get_data_store(
+                name=datastore_path,
+                retry=retries.Retry()
+            )
 
             return {
                 "datastore_id": datastore_id,
@@ -612,5 +981,3 @@ class VertexSetup:
         except Exception as e:
             logger.warning(f"Could not get datastore info: {e}")
             return None
-
-

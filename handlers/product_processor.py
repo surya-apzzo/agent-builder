@@ -228,6 +228,27 @@ class ProductProcessor:
             # If pattern doesn't have {handle}, append handle directly
             return f"{shop_url}{url_pattern}/{link_value}"
 
+    def _format_handle_as_name(self, handle: str) -> str:
+        """
+        Format a handle (e.g., 'anvil-try') into a readable product name (e.g., 'Anvil Try')
+        
+        Args:
+            handle: Product handle (may contain hyphens, underscores, etc.)
+        
+        Returns:
+            Formatted product name with capitalized words
+        """
+        if not handle:
+            return handle
+        
+        # Replace hyphens and underscores with spaces
+        formatted = handle.replace('-', ' ').replace('_', ' ')
+        
+        # Capitalize each word
+        formatted = ' '.join(word.capitalize() for word in formatted.split())
+        
+        return formatted
+
     def _create_curated_products(
         self, 
         df: pd.DataFrame, 
@@ -272,15 +293,37 @@ class ProductProcessor:
                     actual_columns[target] = df_columns_lower[possible_name.lower()]
                     break
 
+        # Also find handle column separately (might be separate from link)
+        handle_col = None
+        handle_columns = ['handle', 'product_handle', 'slug', 'product_slug']
+        for col in handle_columns:
+            if col.lower() in df_columns_lower:
+                handle_col = df_columns_lower[col.lower()]
+                break
+
         logger.info(f"Found columns mapping: {actual_columns}")
 
         for _, row in df.iterrows():
             product = {}
 
             # Extract name (REQUIRED)
+            # Try title/name column first, then fallback to handle
             name_col = actual_columns.get('name')
-            if name_col and pd.notna(row.get(name_col)):
+            
+            if name_col and pd.notna(row.get(name_col)) and str(row[name_col]).strip():
                 product['name'] = str(row[name_col]).strip()
+            elif handle_col and pd.notna(row.get(handle_col)) and str(row[handle_col]).strip():
+                # Use handle as fallback if title/name is null - format it nicely
+                handle_value = str(row[handle_col]).strip()
+                product['name'] = self._format_handle_as_name(handle_value)
+            elif actual_columns.get('link') and pd.notna(row.get(actual_columns['link'])) and str(row[actual_columns['link']]).strip():
+                # Try link column as last resort (might contain handle)
+                link_value = str(row[actual_columns['link']]).strip()
+                # If link looks like a handle (no http/https), format it
+                if not link_value.startswith(('http://', 'https://')):
+                    product['name'] = self._format_handle_as_name(link_value)
+                else:
+                    product['name'] = link_value
             else:
                 product['name'] = 'Untitled Product'
 
@@ -412,6 +455,14 @@ class ProductProcessor:
                 title_col = col
                 break
 
+        # Find handle column (fallback for title)
+        handle_columns = ['handle', 'product_handle', 'slug', 'product_slug']
+        handle_col = None
+        for col in handle_columns:
+            if col in df.columns:
+                handle_col = col
+                break
+
         # Find description column
         desc_columns = ['description', 'body_html', 'body', 'product_description']
         desc_col = None
@@ -437,9 +488,13 @@ class ProductProcessor:
             if not product_id:
                 product_id = f"product-{idx}"
 
-            # Create title
+            # Create title - try title/name first, then fallback to handle
             if title_col and pd.notna(row.get(title_col)):
                 title = str(row[title_col])
+            elif handle_col and pd.notna(row.get(handle_col)):
+                # Use handle as fallback if title/name is null - format it nicely
+                handle_value = str(row[handle_col]).strip()
+                title = self._format_handle_as_name(handle_value)
             else:
                 title = 'Untitled Product'
 

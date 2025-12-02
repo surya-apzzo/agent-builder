@@ -309,18 +309,39 @@ def update_merchant_onboarding_step(
 
 def check_subscription(user_id: str) -> bool:
     """
-    Check if user has active subscription
+    Check if user has active subscription or is a production user
     
     Args:
         user_id: User identifier
     
     Returns:
-        True if user has active subscription
+        True if user has active subscription or is a production user
     """
     conn = None
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # First check if user is a production user (bypasses subscription)
+        # This check is safe even if user_type column doesn't exist yet (will be caught by exception handler)
+        try:
+            user_query = """
+                SELECT user_type 
+                FROM users
+                WHERE user_id = %s
+                LIMIT 1
+            """
+            cursor.execute(user_query, (user_id,))
+            user_result = cursor.fetchone()
+            
+            if user_result and user_result.get('user_type') == 'production':
+                cursor.close()
+                logger.info(f"User {user_id} is a production user, bypassing subscription check")
+                return True
+        except Exception as user_check_error:
+            # If user_type column doesn't exist or other error, log and continue to subscription check
+            logger.debug(f"Could not check user_type (column may not exist yet): {user_check_error}")
+            # Continue to subscription check below
         
         # Check user_subscriptions in billing schema
         query = """

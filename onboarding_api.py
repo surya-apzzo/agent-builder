@@ -521,6 +521,26 @@ async def process_onboarding(
                 shop_url=shop_url,
                 shop_name=shop_name
             )
+            
+            # Log datastore creation status
+            # CRITICAL: Two datastores are created - one for website, one for documents
+            if datastore_result.get("website_datastore"):
+                website_ds = datastore_result["website_datastore"]
+                logger.info(f"✅ Website datastore: {website_ds.get('datastore_id')} ({website_ds.get('status')})")
+                if website_ds.get("site_registration"):
+                    site_reg = website_ds["site_registration"]
+                    if site_reg.get("status") == "registered":
+                        logger.info(f"✅ Website registered for crawling: {shop_url}")
+                        logger.info(f"   Vertex AI Search will automatically start crawling the website")
+                    elif site_reg.get("status") in ["already_registered", "already_exists"]:
+                        logger.info(f"ℹ️ Website already registered for crawling: {shop_url}")
+                    elif site_reg.get("status") == "error":
+                        logger.warning(f"⚠️ Website registration had errors: {site_reg.get('error')}")
+            
+            if datastore_result.get("documents_datastore"):
+                docs_ds = datastore_result["documents_datastore"]
+                logger.info(f"✅ Documents datastore: {docs_ds.get('datastore_id')} ({docs_ds.get('status')})")
+                logger.info(f"   This datastore is used for NDJSON document imports (knowledge base, products, categories)")
 
             # Import documents if available (check if documents.ndjson was created)
             import_errors = []
@@ -538,11 +558,12 @@ async def process_onboarding(
                     logger.error(f"Failed to import documents: {error_msg}")
 
             # Import products if available (check if products.ndjson was created)
+            # Use INCREMENTAL to preserve existing documents (knowledge base)
             products_ndjson_path = f"merchants/{merchant_id}/training_files/products.ndjson"
             if gcs_handler.file_exists(products_ndjson_path):
                 try:
                     gcs_uri = f"gs://{gcs_handler.bucket_name}/{products_ndjson_path}"
-                    vertex_setup.import_documents(merchant_id, gcs_uri, import_type="FULL")
+                    vertex_setup.import_documents(merchant_id, gcs_uri, import_type="INCREMENTAL")
                     import_success.append("products")
                 except Exception as import_error:
                     error_msg = str(import_error)
@@ -550,11 +571,12 @@ async def process_onboarding(
                     logger.error(f"Failed to import products: {error_msg}")
 
             # Import categories if available (check if categories.ndjson was created)
+            # Use INCREMENTAL to preserve existing documents (knowledge base and products)
             categories_ndjson_path = f"merchants/{merchant_id}/training_files/categories.ndjson"
             if gcs_handler.file_exists(categories_ndjson_path):
                 try:
                     gcs_uri = f"gs://{gcs_handler.bucket_name}/{categories_ndjson_path}"
-                    vertex_setup.import_documents(merchant_id, gcs_uri, import_type="FULL")
+                    vertex_setup.import_documents(merchant_id, gcs_uri, import_type="INCREMENTAL")
                     import_success.append("categories")
                 except Exception as import_error:
                     error_msg = str(import_error)
@@ -1491,15 +1513,13 @@ async def create_agent(
         if not merchant.get('ai_persona_saved'):
             raise HTTPException(
                 status_code=400,
-                detail="AI Persona (Step 1) not saved. Please complete Step 1 first.",
-                missing_step="ai_persona"
+                detail="AI Persona (Step 1) not saved. Please complete Step 1 first."
             )
         
         if not merchant.get('knowledge_base_saved'):
             raise HTTPException(
                 status_code=400,
-                detail="Knowledge Base (Step 2) not saved. Please complete Step 2 first.",
-                missing_step="knowledge_base"
+                detail="Knowledge Base (Step 2) not saved. Please complete Step 2 first."
             )
         
         # Collect all data from merchant record
